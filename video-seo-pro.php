@@ -41,6 +41,7 @@ class VideoSEOPro {
         add_action('wp_ajax_save_video_settings', [$this, 'ajax_save_settings']);
         add_action('wp_ajax_scan_video_posts', [$this, 'ajax_scan_video_posts']);
         add_action('wp_ajax_enable_video_features', [$this, 'ajax_enable_video_features']);
+        add_action('wp_ajax_fix_database_structure', [$this, 'ajax_fix_database_structure']);
 
         register_activation_hook(__FILE__, [$this, 'activate']);
     }
@@ -77,10 +78,35 @@ class VideoSEOPro {
 
     private function fix_analytics_table() {
         global $wpdb;
+
+        // Check if table exists first
+        $table_exists = $wpdb->get_var("SHOW TABLES LIKE '{$this->table_name}'");
+        if (!$table_exists) {
+            return;
+        }
+
+        // Check if video_id column exists (old name)
         $column_exists = $wpdb->get_results("SHOW COLUMNS FROM {$this->table_name} LIKE 'video_id'");
 
         if (!empty($column_exists)) {
             $wpdb->query("ALTER TABLE {$this->table_name} CHANGE video_id post_id bigint(20) NOT NULL");
+        }
+
+        // Verify post_id column exists
+        $post_id_exists = $wpdb->get_results("SHOW COLUMNS FROM {$this->table_name} LIKE 'post_id'");
+        if (empty($post_id_exists)) {
+            // If neither video_id nor post_id exists, add post_id column
+            $wpdb->query("ALTER TABLE {$this->table_name} ADD COLUMN post_id bigint(20) NOT NULL AFTER id");
+        }
+    }
+
+    private function ensure_table_structure() {
+        global $wpdb;
+
+        // Check if post_id column exists, if not, run fix
+        $post_id_exists = $wpdb->get_results("SHOW COLUMNS FROM {$this->table_name} LIKE 'post_id'");
+        if (empty($post_id_exists)) {
+            $this->fix_analytics_table();
         }
     }
 
@@ -288,20 +314,20 @@ class VideoSEOPro {
     public function video_analytics_meta_box($post) {
         global $wpdb;
 
-        $total_views = $wpdb->get_var($wpdb->prepare(
-            "SELECT COUNT(*) FROM {$this->table_name} WHERE post_id = %d",
+        // Ensure table structure is correct
+        $this->ensure_table_structure();
+
+        $stats = $wpdb->get_row($wpdb->prepare(
+            "SELECT COUNT(*) as views, AVG(watch_time) as avg_time, (SUM(completed) / COUNT(*)) * 100 as completion_rate
+            FROM {$this->table_name}
+            WHERE post_id = %d",
             $post->ID
         ));
 
-        $avg_watch_time = $wpdb->get_var($wpdb->prepare(
-            "SELECT AVG(watch_time) FROM {$this->table_name} WHERE post_id = %d",
-            $post->ID
-        ));
-
-        $completion_rate = $wpdb->get_var($wpdb->prepare(
-            "SELECT (SUM(completed) / COUNT(*)) * 100 FROM {$this->table_name} WHERE post_id = %d",
-            $post->ID
-        ));
+        // Handle null results
+        $total_views = $stats && isset($stats->views) ? $stats->views : 0;
+        $avg_watch_time = $stats && isset($stats->avg_time) ? $stats->avg_time : 0;
+        $completion_rate = $stats && isset($stats->completion_rate) ? $stats->completion_rate : 0;
 
         ?>
         <div class="video-analytics-summary">
@@ -461,6 +487,9 @@ class VideoSEOPro {
         check_ajax_referer('video-seo-nonce', 'nonce');
 
         global $wpdb;
+
+        // Ensure table structure is correct
+        $this->ensure_table_structure();
 
         $post_id = intval($_POST['post_id']);
         $watch_time = intval($_POST['watch_time']);
@@ -859,6 +888,45 @@ class VideoSEOPro {
         wp_send_json_success('Video features enabled');
     }
 
+    public function ajax_fix_database_structure() {
+        check_ajax_referer('video-seo-nonce', 'nonce');
+
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error('Insufficient permissions');
+        }
+
+        global $wpdb;
+
+        // Check current structure
+        $columns = $wpdb->get_results("SHOW COLUMNS FROM {$this->table_name}");
+        $column_names = array_column($columns, 'Field');
+
+        $has_video_id = in_array('video_id', $column_names);
+        $has_post_id = in_array('post_id', $column_names);
+
+        if ($has_video_id && !$has_post_id) {
+            // Rename video_id to post_id
+            $result = $wpdb->query("ALTER TABLE {$this->table_name} CHANGE video_id post_id bigint(20) NOT NULL");
+
+            if ($result !== false) {
+                wp_send_json_success('Database structure fixed! Column renamed from video_id to post_id.');
+            } else {
+                wp_send_json_error('Failed to rename column: ' . $wpdb->last_error);
+            }
+        } elseif (!$has_post_id) {
+            // Add post_id column if missing
+            $result = $wpdb->query("ALTER TABLE {$this->table_name} ADD COLUMN post_id bigint(20) NOT NULL AFTER id");
+
+            if ($result !== false) {
+                wp_send_json_success('Database structure fixed! Added post_id column.');
+            } else {
+                wp_send_json_error('Failed to add column: ' . $wpdb->last_error);
+            }
+        } else {
+            wp_send_json_success('Database structure is already correct!');
+        }
+    }
+
     public function dashboard_page() {
         ?>
         <div class="wrap">
@@ -1020,6 +1088,9 @@ class VideoSEOPro {
     public function analytics_page() {
         global $wpdb;
 
+        // Ensure table structure is correct
+        $this->ensure_table_structure();
+
         $video_posts = get_posts([
             'post_type' => 'post',
             'posts_per_page' => -1,
@@ -1032,48 +1103,77 @@ class VideoSEOPro {
         <div class="wrap">
             <h1>Video Analytics</h1>
 
-            <table class="wp-list-table widefat fixed striped">
-                <thead>
-                    <tr>
-                        <th>Post</th>
-                        <th>Total Views</th>
-                        <th>Avg Watch Time</th>
-                        <th>Completion Rate</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    <?php foreach ($video_posts as $post):
-                        $stats = $wpdb->get_row($wpdb->prepare(
-                            "SELECT COUNT(*) as views, AVG(watch_time) as avg_time, (SUM(completed) / COUNT(*)) * 100 as completion_rate
-                            FROM {$this->table_name}
-                            WHERE post_id = %d",
-                            $post->ID
-                        ));
-                    ?>
-                    <tr>
-                        <td>
-                            <strong><?php echo esc_html($post->post_title); ?></strong><br>
-                            <a href="<?php echo get_edit_post_link($post->ID); ?>">Edit</a> |
-                            <a href="<?php echo get_permalink($post->ID); ?>" target="_blank">View</a>
-                        </td>
-                        <td><?php echo number_format($stats->views); ?></td>
-                        <td><?php echo gmdate('i:s', (int)$stats->avg_time); ?></td>
-                        <td><?php echo round($stats->completion_rate, 1); ?>%</td>
-                    </tr>
-                    <?php endforeach; ?>
-                </tbody>
-            </table>
+            <?php if (empty($video_posts)): ?>
+                <div class="notice notice-info">
+                    <p>No video posts found. <a href="<?php echo admin_url('admin.php?page=video-seo-dashboard'); ?>">Enable video features</a> on your posts to start tracking analytics.</p>
+                </div>
+            <?php else: ?>
+                <table class="wp-list-table widefat fixed striped">
+                    <thead>
+                        <tr>
+                            <th>Post</th>
+                            <th>Total Views</th>
+                            <th>Avg Watch Time</th>
+                            <th>Completion Rate</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <?php foreach ($video_posts as $post):
+                            $stats = $wpdb->get_row($wpdb->prepare(
+                                "SELECT COUNT(*) as views, AVG(watch_time) as avg_time, (SUM(completed) / COUNT(*)) * 100 as completion_rate
+                                FROM {$this->table_name}
+                                WHERE post_id = %d",
+                                $post->ID
+                            ));
+
+                            // Handle null results
+                            $views = $stats && isset($stats->views) ? $stats->views : 0;
+                            $avg_time = $stats && isset($stats->avg_time) ? $stats->avg_time : 0;
+                            $completion = $stats && isset($stats->completion_rate) ? $stats->completion_rate : 0;
+                        ?>
+                        <tr>
+                            <td>
+                                <strong><?php echo esc_html($post->post_title); ?></strong><br>
+                                <a href="<?php echo get_edit_post_link($post->ID); ?>">Edit</a> |
+                                <a href="<?php echo get_permalink($post->ID); ?>" target="_blank">View</a>
+                            </td>
+                            <td><?php echo number_format($views); ?></td>
+                            <td><?php echo gmdate('i:s', (int)$avg_time); ?></td>
+                            <td><?php echo round($completion, 1); ?>%</td>
+                        </tr>
+                        <?php endforeach; ?>
+                    </tbody>
+                </table>
+            <?php endif; ?>
         </div>
         <?php
     }
 
     public function settings_page() {
+        global $wpdb;
+
         $youtube_api_key = get_option('video_seo_youtube_api_key', '');
         $enable_analytics = get_option('video_seo_enable_analytics', '1');
         $auto_embed = get_option('video_seo_auto_embed', '1');
+
+        // Check database structure
+        $columns = $wpdb->get_results("SHOW COLUMNS FROM {$this->table_name}");
+        $column_names = array_column($columns, 'Field');
+        $has_post_id = in_array('post_id', $column_names);
+
         ?>
         <div class="wrap">
             <h1>Video SEO Settings</h1>
+
+            <?php if (!$has_post_id): ?>
+                <div class="notice notice-warning">
+                    <p><strong>Database Update Required:</strong> Your analytics table needs to be updated.</p>
+                    <p>
+                        <button type="button" id="fix-database-btn" class="button button-primary">Fix Database Structure Now</button>
+                        <span id="fix-db-status" style="margin-left: 10px;"></span>
+                    </p>
+                </div>
+            <?php endif; ?>
 
             <form id="video-seo-settings-form">
                 <table class="form-table">
@@ -1132,6 +1232,29 @@ class VideoSEOPro {
                 }, function(response) {
                     if (response.success) {
                         $('#settings-message').html('<div class="notice notice-success"><p>' + response.data + '</p></div>');
+                    }
+                });
+            });
+
+            $('#fix-database-btn').on('click', function() {
+                const btn = $(this);
+                const status = $('#fix-db-status');
+
+                btn.prop('disabled', true).text('Fixing...');
+                status.html('<span class="spinner is-active" style="float: none;"></span>');
+
+                $.post(videoSEO.ajaxurl, {
+                    action: 'fix_database_structure',
+                    nonce: videoSEO.nonce
+                }, function(response) {
+                    if (response.success) {
+                        status.html('<span style="color: green;">✓ ' + response.data + '</span>');
+                        setTimeout(function() {
+                            location.reload();
+                        }, 1500);
+                    } else {
+                        status.html('<span style="color: red;">✗ ' + response.data + '</span>');
+                        btn.prop('disabled', false).text('Fix Database Structure Now');
                     }
                 });
             });

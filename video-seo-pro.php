@@ -1,15 +1,20 @@
 <?php
 /**
- * Plugin Name: Video SEO Pro (Simple)
- * Description: Add video SEO features to your existing posts
- * Version: 2.0.2
+ * Plugin Name: Video SEO Pro
+ * Plugin URI: https://example.com/video-seo-pro
+ * Description: Add video SEO features to your existing posts - no separate post type needed!
+ * Version: 2.0.3
  * Author: Your Name
+ * License: GPL v2 or later
+ * Text Domain: video-seo-pro
  */
 
-if (!defined('ABSPATH')) exit;
+if (!defined('ABSPATH')) {
+    exit;
+}
 
-class VideoSEOProSimple {
-    private $version = '2.0.2';
+class VideoSEOPro {
+    private $version = '2.0.3';
     private $table_name;
 
     public function __construct() {
@@ -25,13 +30,17 @@ class VideoSEOProSimple {
         add_filter('the_content', [$this, 'auto_embed_video']);
         add_shortcode('video_player', [$this, 'video_player_shortcode']);
 
+        // Sitemap handling
         add_action('init', [$this, 'add_sitemap_rewrite']);
         add_action('template_redirect', [$this, 'serve_video_sitemap']);
 
+        // AJAX handlers
         add_action('wp_ajax_fetch_youtube_data', [$this, 'ajax_fetch_youtube_data']);
         add_action('wp_ajax_track_video_view', [$this, 'ajax_track_video_view']);
         add_action('wp_ajax_nopriv_track_video_view', [$this, 'ajax_track_video_view']);
         add_action('wp_ajax_save_video_settings', [$this, 'ajax_save_settings']);
+        add_action('wp_ajax_scan_video_posts', [$this, 'ajax_scan_video_posts']);
+        add_action('wp_ajax_enable_video_features', [$this, 'ajax_enable_video_features']);
 
         register_activation_hook(__FILE__, [$this, 'activate']);
     }
@@ -44,6 +53,7 @@ class VideoSEOProSimple {
 
     private function create_analytics_table() {
         global $wpdb;
+
         $charset_collate = $wpdb->get_charset_collate();
 
         $sql = "CREATE TABLE IF NOT EXISTS {$this->table_name} (
@@ -56,7 +66,7 @@ class VideoSEOProSimple {
             completed tinyint(1) DEFAULT 0,
             user_agent text,
             ip_address varchar(45),
-            PRIMARY KEY (id),
+            PRIMARY KEY  (id),
             KEY post_id (post_id),
             KEY view_date (view_date)
         ) $charset_collate;";
@@ -79,10 +89,37 @@ class VideoSEOProSimple {
             'Video SEO',
             'Video SEO',
             'manage_options',
-            'video-seo-settings',
-            [$this, 'settings_page'],
+            'video-seo-dashboard',
+            [$this, 'dashboard_page'],
             'dashicons-video-alt3',
             30
+        );
+
+        add_submenu_page(
+            'video-seo-dashboard',
+            'Dashboard',
+            'Dashboard',
+            'manage_options',
+            'video-seo-dashboard',
+            [$this, 'dashboard_page']
+        );
+
+        add_submenu_page(
+            'video-seo-dashboard',
+            'Analytics',
+            'Analytics',
+            'manage_options',
+            'video-seo-analytics',
+            [$this, 'analytics_page']
+        );
+
+        add_submenu_page(
+            'video-seo-dashboard',
+            'Settings',
+            'Settings',
+            'manage_options',
+            'video-seo-settings',
+            [$this, 'settings_page']
         );
     }
 
@@ -95,6 +132,40 @@ class VideoSEOProSimple {
             'side',
             'high'
         );
+
+        add_meta_box(
+            'video_details',
+            'Video Details',
+            [$this, 'video_details_meta_box'],
+            'post',
+            'normal',
+            'high'
+        );
+
+        add_meta_box(
+            'video_seo',
+            'Video SEO',
+            [$this, 'video_seo_meta_box'],
+            'post',
+            'normal',
+            'high'
+        );
+
+        // Add analytics summary for posts with video enabled
+        $screen = get_current_screen();
+        if ($screen && $screen->id === 'post') {
+            global $post;
+            if ($post && get_post_meta($post->ID, '_is_video_post', true) === '1') {
+                add_meta_box(
+                    'video_analytics_summary',
+                    'Video Analytics',
+                    [$this, 'video_analytics_meta_box'],
+                    'post',
+                    'side',
+                    'default'
+                );
+            }
+        }
     }
 
     public function video_features_meta_box($post) {
@@ -102,70 +173,142 @@ class VideoSEOProSimple {
 
         $is_video_post = get_post_meta($post->ID, '_is_video_post', true);
         $video_url = get_post_meta($post->ID, '_video_url', true);
-        $video_duration = get_post_meta($post->ID, '_video_duration', true);
-        $youtube_id = get_post_meta($post->ID, '_youtube_id', true);
-        $seo_title = get_post_meta($post->ID, '_seo_title', true);
-        $seo_description = get_post_meta($post->ID, '_seo_description', true);
 
         ?>
         <div style="padding: 10px 0;">
             <label style="display: block; margin-bottom: 15px;">
                 <input type="checkbox" id="is_video_post" name="is_video_post" value="1" <?php checked($is_video_post, '1'); ?>>
-                <strong>Enable video features</strong>
+                <strong>This post contains a video</strong>
             </label>
 
-            <div id="video-features-settings" style="<?php echo $is_video_post === '1' ? '' : 'display:none;'; ?>">
-                <div style="margin-bottom: 15px;">
-                    <label style="display: block; margin-bottom: 5px; font-weight: bold;">Video URL</label>
-                    <input type="url" name="video_url" id="video_url" value="<?php echo esc_attr($video_url); ?>" class="widefat" placeholder="https://youtube.com/watch?v=...">
-                    <button type="button" class="button button-small" id="fetch-youtube-data" style="margin-top: 5px;">Import from YouTube</button>
-                </div>
-
-                <div style="margin-bottom: 15px;">
-                    <label style="display: block; margin-bottom: 5px; font-weight: bold;">YouTube ID</label>
-                    <input type="text" name="youtube_id" id="youtube_id" value="<?php echo esc_attr($youtube_id); ?>" class="widefat">
-                </div>
-
-                <div style="margin-bottom: 15px;">
-                    <label style="display: block; margin-bottom: 5px; font-weight: bold;">Duration (seconds)</label>
-                    <input type="number" name="video_duration" id="video_duration" value="<?php echo esc_attr($video_duration); ?>" class="widefat">
-                </div>
-
-                <hr style="margin: 15px 0;">
-
-                <div style="margin-bottom: 15px;">
-                    <label style="display: block; margin-bottom: 5px; font-weight: bold;">SEO Title</label>
-                    <input type="text" name="seo_title" id="seo_title" value="<?php echo esc_attr($seo_title); ?>" class="widefat">
-                    <button type="button" class="button button-small" id="generate-seo-title" style="margin-top: 5px;">Auto-Generate</button>
-                </div>
-
-                <div style="margin-bottom: 15px;">
-                    <label style="display: block; margin-bottom: 5px; font-weight: bold;">Meta Description</label>
-                    <textarea name="seo_description" id="seo_description" rows="3" class="widefat"><?php echo esc_textarea($seo_description); ?></textarea>
-                    <button type="button" class="button button-small" id="generate-seo-description" style="margin-top: 5px;">Auto-Generate</button>
-                </div>
-
-                <div style="background: #d4edda; padding: 10px; border-radius: 4px; font-size: 12px; margin-top: 15px;">
-                    ✓ Video SEO enabled<br>
+            <div id="video-features-info" style="<?php echo $is_video_post === '1' ? '' : 'display:none;'; ?>">
+                <p style="background: #d4edda; padding: 10px; border-radius: 4px; font-size: 12px;">
+                    ✓ Video SEO features enabled<br>
                     ✓ Schema markup active<br>
+                    ✓ Analytics tracking on<br>
+                    <?php if ($video_url): ?>
                     ✓ Video will auto-embed
-                </div>
+                    <?php endif; ?>
+                </p>
             </div>
         </div>
-
-        <div id="youtube-import-status"></div>
 
         <script>
         jQuery(document).ready(function($) {
             $('#is_video_post').on('change', function() {
                 if ($(this).is(':checked')) {
-                    $('#video-features-settings').slideDown();
+                    $('#video-features-info').slideDown();
+                    $('#video_details, #video_seo').closest('.postbox').slideDown();
                 } else {
-                    $('#video-features-settings').slideUp();
+                    $('#video-features-info').slideUp();
+                    $('#video_details, #video_seo').closest('.postbox').slideUp();
                 }
             });
+
+            // Hide video meta boxes if not a video post
+            if (!$('#is_video_post').is(':checked')) {
+                $('#video_details, #video_seo').closest('.postbox').hide();
+            }
         });
         </script>
+        <?php
+    }
+
+    public function video_details_meta_box($post) {
+        $video_url = get_post_meta($post->ID, '_video_url', true);
+        $video_duration = get_post_meta($post->ID, '_video_duration', true);
+        $video_upload_date = get_post_meta($post->ID, '_video_upload_date', true);
+        $video_thumbnail = get_post_meta($post->ID, '_video_thumbnail', true);
+        $youtube_id = get_post_meta($post->ID, '_youtube_id', true);
+
+        ?>
+        <table class="form-table">
+            <tr>
+                <th><label for="video_url">Video URL</label></th>
+                <td>
+                    <input type="url" id="video_url" name="video_url" value="<?php echo esc_attr($video_url); ?>" class="large-text">
+                    <button type="button" class="button" id="fetch-youtube-data">Import from YouTube</button>
+                    <p class="description">YouTube, Vimeo, or direct video URL</p>
+                </td>
+            </tr>
+            <tr>
+                <th><label for="youtube_id">YouTube Video ID</label></th>
+                <td>
+                    <input type="text" id="youtube_id" name="youtube_id" value="<?php echo esc_attr($youtube_id); ?>" class="regular-text">
+                    <p class="description">Auto-extracted from URL</p>
+                </td>
+            </tr>
+            <tr>
+                <th><label for="video_duration">Duration (seconds)</label></th>
+                <td>
+                    <input type="number" id="video_duration" name="video_duration" value="<?php echo esc_attr($video_duration); ?>" class="small-text">
+                </td>
+            </tr>
+            <tr>
+                <th><label for="video_upload_date">Upload Date</label></th>
+                <td>
+                    <input type="date" id="video_upload_date" name="video_upload_date" value="<?php echo esc_attr($video_upload_date); ?>">
+                </td>
+            </tr>
+            <tr>
+                <th><label for="video_thumbnail">Thumbnail URL</label></th>
+                <td>
+                    <input type="url" id="video_thumbnail" name="video_thumbnail" value="<?php echo esc_attr($video_thumbnail); ?>" class="large-text">
+                </td>
+            </tr>
+        </table>
+        <div id="youtube-import-status" style="margin-top: 15px;"></div>
+        <?php
+    }
+
+    public function video_seo_meta_box($post) {
+        $seo_title = get_post_meta($post->ID, '_seo_title', true);
+        $seo_description = get_post_meta($post->ID, '_seo_description', true);
+
+        ?>
+        <table class="form-table">
+            <tr>
+                <th><label for="seo_title">SEO Title</label></th>
+                <td>
+                    <input type="text" id="seo_title" name="seo_title" value="<?php echo esc_attr($seo_title); ?>" class="large-text">
+                    <button type="button" class="button" id="generate-seo-title">Auto-Generate</button>
+                </td>
+            </tr>
+            <tr>
+                <th><label for="seo_description">Meta Description</label></th>
+                <td>
+                    <textarea id="seo_description" name="seo_description" rows="3" class="large-text"><?php echo esc_textarea($seo_description); ?></textarea>
+                    <button type="button" class="button" id="generate-seo-description">Auto-Generate</button>
+                </td>
+            </tr>
+        </table>
+        <?php
+    }
+
+    public function video_analytics_meta_box($post) {
+        global $wpdb;
+
+        $total_views = $wpdb->get_var($wpdb->prepare(
+            "SELECT COUNT(*) FROM {$this->table_name} WHERE post_id = %d",
+            $post->ID
+        ));
+
+        $avg_watch_time = $wpdb->get_var($wpdb->prepare(
+            "SELECT AVG(watch_time) FROM {$this->table_name} WHERE post_id = %d",
+            $post->ID
+        ));
+
+        $completion_rate = $wpdb->get_var($wpdb->prepare(
+            "SELECT (SUM(completed) / COUNT(*)) * 100 FROM {$this->table_name} WHERE post_id = %d",
+            $post->ID
+        ));
+
+        ?>
+        <div class="video-analytics-summary">
+            <p><strong>Total Views:</strong> <?php echo number_format($total_views); ?></p>
+            <p><strong>Avg Watch Time:</strong> <?php echo gmdate('i:s', (int)$avg_watch_time); ?></p>
+            <p><strong>Completion Rate:</strong> <?php echo round($completion_rate, 1); ?>%</p>
+        </div>
         <?php
     }
 
@@ -174,14 +317,24 @@ class VideoSEOProSimple {
             return;
         }
 
-        if (defined('DOING_AUTOSAVE') && DOING_AUTOSAVE) return;
-        if (!current_user_can('edit_post', $post_id)) return;
-        if ($post->post_type !== 'post') return;
+        if (defined('DOING_AUTOSAVE') && DOING_AUTOSAVE) {
+            return;
+        }
+
+        if (!current_user_can('edit_post', $post_id)) {
+            return;
+        }
+
+        if ($post->post_type !== 'post') {
+            return;
+        }
 
         $is_video_post = isset($_POST['is_video_post']) ? '1' : '0';
         update_post_meta($post_id, '_is_video_post', $is_video_post);
 
-        if ($is_video_post === '0') return;
+        if ($is_video_post === '0') {
+            return;
+        }
 
         if (isset($_POST['video_url'])) {
             $video_url = sanitize_text_field($_POST['video_url']);
@@ -199,6 +352,14 @@ class VideoSEOProSimple {
 
         if (isset($_POST['video_duration'])) {
             update_post_meta($post_id, '_video_duration', intval($_POST['video_duration']));
+        }
+
+        if (isset($_POST['video_upload_date'])) {
+            update_post_meta($post_id, '_video_upload_date', sanitize_text_field($_POST['video_upload_date']));
+        }
+
+        if (isset($_POST['video_thumbnail'])) {
+            update_post_meta($post_id, '_video_thumbnail', sanitize_text_field($_POST['video_thumbnail']));
         }
 
         if (isset($_POST['seo_title'])) {
@@ -289,7 +450,9 @@ class VideoSEOProSimple {
         wp_send_json_success([
             'title' => $video_data['snippet']['title'],
             'description' => $video_data['snippet']['description'],
+            'thumbnail' => $video_data['snippet']['thumbnails']['maxres']['url'] ?? $video_data['snippet']['thumbnails']['high']['url'],
             'duration' => $total_seconds,
+            'upload_date' => date('Y-m-d', strtotime($video_data['snippet']['publishedAt'])),
             'youtube_id' => $youtube_id
         ]);
     }
@@ -342,27 +505,46 @@ class VideoSEOProSimple {
     }
 
     public function add_video_schema() {
-        if (!is_single()) return;
+        if (!is_single()) {
+            return;
+        }
 
         global $post;
 
         $is_video_post = get_post_meta($post->ID, '_is_video_post', true);
-        if ($is_video_post !== '1') return;
+        if ($is_video_post !== '1') {
+            return;
+        }
 
         $video_url = get_post_meta($post->ID, '_video_url', true);
-        if (empty($video_url)) return;
+        if (empty($video_url)) {
+            return;
+        }
 
         $duration = get_post_meta($post->ID, '_video_duration', true);
+        $upload_date = get_post_meta($post->ID, '_video_upload_date', true);
+        $thumbnail = get_post_meta($post->ID, '_video_thumbnail', true);
         $seo_description = get_post_meta($post->ID, '_seo_description', true);
-        $thumbnail = get_the_post_thumbnail_url($post->ID, 'full');
+
+        if (empty($thumbnail)) {
+            $thumbnail = get_the_post_thumbnail_url($post->ID, 'full');
+        }
+
+        if (empty($upload_date)) {
+            $upload_date = get_the_date('Y-m-d', $post->ID);
+        }
+
+        if (empty($seo_description)) {
+            $seo_description = get_the_excerpt($post);
+        }
 
         $schema = [
             '@context' => 'https://schema.org',
             '@type' => 'VideoObject',
             'name' => get_the_title($post->ID),
-            'description' => $seo_description ?: get_the_excerpt($post),
+            'description' => $seo_description,
             'thumbnailUrl' => $thumbnail,
-            'uploadDate' => get_the_date('c', $post->ID),
+            'uploadDate' => $upload_date,
             'contentUrl' => $video_url,
             'embedUrl' => $video_url
         ];
@@ -375,15 +557,21 @@ class VideoSEOProSimple {
     }
 
     public function add_analytics_tracking() {
-        if (!is_single()) return;
+        if (!is_single()) {
+            return;
+        }
 
         global $post;
 
         $is_video_post = get_post_meta($post->ID, '_is_video_post', true);
-        if ($is_video_post !== '1') return;
+        if ($is_video_post !== '1') {
+            return;
+        }
 
         $tracking_enabled = get_option('video_seo_enable_analytics', '1');
-        if ($tracking_enabled !== '1') return;
+        if ($tracking_enabled !== '1') {
+            return;
+        }
 
         ?>
         <script>
@@ -471,6 +659,7 @@ class VideoSEOProSimple {
     private function render_video_player($post_id) {
         $video_url = get_post_meta($post_id, '_video_url', true);
         $youtube_id = get_post_meta($post_id, '_youtube_id', true);
+        $video_thumbnail = get_post_meta($post_id, '_video_thumbnail', true);
 
         if (empty($video_url)) {
             return '';
@@ -487,14 +676,19 @@ class VideoSEOProSimple {
         } elseif (strpos($video_url, 'vimeo.com') !== false) {
             preg_match('/vimeo\.com\/(\d+)/', $video_url, $matches);
             if (!empty($matches[1])) {
+                $vimeo_id = $matches[1];
                 $output .= '<div style="position: relative; padding-bottom: 56.25%; height: 0;">';
-                $output .= '<iframe src="https://player.vimeo.com/video/' . esc_attr($matches[1]) . '" ';
+                $output .= '<iframe src="https://player.vimeo.com/video/' . esc_attr($vimeo_id) . '" ';
                 $output .= 'style="position: absolute; top: 0; left: 0; width: 100%; height: 100%;" ';
                 $output .= 'frameborder="0" allowfullscreen></iframe>';
                 $output .= '</div>';
             }
         } else {
-            $output .= '<video controls style="width: 100%;"><source src="' . esc_url($video_url) . '" type="video/mp4"></video>';
+            $output .= '<video controls style="width: 100%;"';
+            if ($video_thumbnail) {
+                $output .= ' poster="' . esc_url($video_thumbnail) . '"';
+            }
+            $output .= '><source src="' . esc_url($video_url) . '" type="video/mp4">Your browser does not support the video tag.</video>';
         }
 
         $output .= '</div>';
@@ -507,7 +701,9 @@ class VideoSEOProSimple {
     }
 
     public function serve_video_sitemap() {
-        if (!get_query_var('video_sitemap')) return;
+        if (!get_query_var('video_sitemap')) {
+            return;
+        }
 
         header('Content-Type: application/xml; charset=utf-8');
         echo '<?xml version="1.0" encoding="UTF-8"?>' . "\n";
@@ -525,8 +721,12 @@ class VideoSEOProSimple {
         foreach ($video_posts as $post) {
             $video_url = get_post_meta($post->ID, '_video_url', true);
             $duration = get_post_meta($post->ID, '_video_duration', true);
-            $thumbnail = get_the_post_thumbnail_url($post->ID, 'full');
+            $thumbnail = get_post_meta($post->ID, '_video_thumbnail', true);
             $seo_description = get_post_meta($post->ID, '_seo_description', true);
+
+            if (empty($thumbnail)) {
+                $thumbnail = get_the_post_thumbnail_url($post->ID, 'full');
+            }
 
             echo '  <url>' . "\n";
             echo '    <loc>' . get_permalink($post->ID) . '</loc>' . "\n";
@@ -588,6 +788,285 @@ class VideoSEOProSimple {
         wp_send_json_success('Settings saved successfully!');
     }
 
+    public function ajax_scan_video_posts() {
+        check_ajax_referer('video-seo-nonce', 'nonce');
+
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error('Insufficient permissions');
+        }
+
+        $all_posts = get_posts([
+            'post_type' => 'post',
+            'posts_per_page' => -1,
+            'post_status' => 'publish'
+        ]);
+
+        $video_posts = [];
+        $potential_videos = [];
+
+        foreach ($all_posts as $post) {
+            $is_video = get_post_meta($post->ID, '_is_video_post', true);
+            $has_video_url = get_post_meta($post->ID, '_video_url', true);
+
+            if ($is_video === '1') {
+                $video_posts[] = [
+                    'id' => $post->ID,
+                    'title' => $post->post_title,
+                    'url' => get_permalink($post->ID),
+                    'edit_url' => get_edit_post_link($post->ID, 'raw'),
+                    'has_video_url' => !empty($has_video_url)
+                ];
+            } else {
+                $all_meta = get_post_meta($post->ID);
+                $has_potential_video = false;
+
+                foreach ($all_meta as $key => $values) {
+                    foreach ($values as $value) {
+                        if (is_string($value) && (strpos($value, 'youtube') !== false || strpos($value, 'vimeo') !== false)) {
+                            $has_potential_video = true;
+                            break 2;
+                        }
+                    }
+                }
+
+                if ($has_potential_video) {
+                    $potential_videos[] = [
+                        'id' => $post->ID,
+                        'title' => $post->post_title,
+                        'edit_url' => get_edit_post_link($post->ID, 'raw')
+                    ];
+                }
+            }
+        }
+
+        wp_send_json_success([
+            'total_posts' => count($all_posts),
+            'video_posts' => $video_posts,
+            'potential_videos' => $potential_videos
+        ]);
+    }
+
+    public function ajax_enable_video_features() {
+        check_ajax_referer('video-seo-nonce', 'nonce');
+
+        if (!current_user_can('edit_posts')) {
+            wp_send_json_error('Insufficient permissions');
+        }
+
+        $post_id = intval($_POST['post_id']);
+        update_post_meta($post_id, '_is_video_post', '1');
+
+        wp_send_json_success('Video features enabled');
+    }
+
+    public function dashboard_page() {
+        ?>
+        <div class="wrap">
+            <h1>Video SEO Dashboard</h1>
+
+            <div class="card" style="max-width: 800px;">
+                <h2>Welcome to Video SEO Pro</h2>
+                <p>This plugin adds video SEO features directly to your existing posts - no separate post type needed!</p>
+
+                <h3>How It Works:</h3>
+                <ol>
+                    <li>Edit any post and check <strong>"This post contains a video"</strong> in the sidebar</li>
+                    <li>Add your video URL and details</li>
+                    <li>Video SEO features automatically activate for that post</li>
+                    <li>Your post stays a regular post - just with video superpowers!</li>
+                </ol>
+            </div>
+
+            <div style="margin-top: 20px;">
+                <button type="button" id="scan-posts-btn" class="button button-primary button-large">
+                    Scan My Posts for Videos
+                </button>
+                <span id="scan-status" style="margin-left: 15px;"></span>
+            </div>
+
+            <div id="scan-results" style="display: none; margin-top: 30px;">
+                <div class="card">
+                    <h2>Posts with Video Features Enabled: <span id="video-count">0</span></h2>
+                    <table class="wp-list-table widefat fixed striped">
+                        <thead>
+                            <tr>
+                                <th>Post Title</th>
+                                <th>Has Video URL</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="video-posts-list"></tbody>
+                    </table>
+                </div>
+
+                <div class="card" style="margin-top: 20px;" id="potential-videos-card" style="display: none;">
+                    <h2>Posts That Might Have Videos: <span id="potential-count">0</span></h2>
+                    <p>These posts have video URLs in custom fields but video features aren't enabled yet.</p>
+                    <table class="wp-list-table widefat fixed striped">
+                        <thead>
+                            <tr>
+                                <th>Post Title</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="potential-videos-list"></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <script>
+        jQuery(document).ready(function($) {
+            $('#scan-posts-btn').on('click', function() {
+                const btn = $(this);
+                const status = $('#scan-status');
+
+                btn.prop('disabled', true).text('Scanning...');
+                status.html('<span class="spinner is-active"></span>');
+
+                $.ajax({
+                    url: videoSEO.ajaxurl,
+                    type: 'POST',
+                    data: {
+                        action: 'scan_video_posts',
+                        nonce: videoSEO.nonce
+                    },
+                    success: function(response) {
+                        if (response.success) {
+                            displayResults(response.data);
+                            $('#scan-results').show();
+                            status.html('<span style="color: green;">✓ Scan complete</span>');
+                        }
+                    },
+                    complete: function() {
+                        btn.prop('disabled', false).text('Scan My Posts for Videos');
+                    }
+                });
+            });
+
+            function displayResults(data) {
+                $('#video-count').text(data.video_posts.length);
+
+                const videosTable = $('#video-posts-list');
+                videosTable.empty();
+
+                if (data.video_posts.length === 0) {
+                    videosTable.append('<tr><td colspan="3">No posts with video features enabled yet.</td></tr>');
+                } else {
+                    data.video_posts.forEach(function(post) {
+                        videosTable.append(`
+                            <tr>
+                                <td><strong>${post.title}</strong></td>
+                                <td>${post.has_video_url ? '✓ Yes' : '✗ No video URL'}</td>
+                                <td>
+                                    <a href="${post.edit_url}" class="button">Edit</a>
+                                    <a href="${post.url}" target="_blank" class="button">View</a>
+                                </td>
+                            </tr>
+                        `);
+                    });
+                }
+
+                if (data.potential_videos.length > 0) {
+                    $('#potential-count').text(data.potential_videos.length);
+                    $('#potential-videos-card').show();
+
+                    const potentialTable = $('#potential-videos-list');
+                    potentialTable.empty();
+
+                    data.potential_videos.forEach(function(post) {
+                        potentialTable.append(`
+                            <tr>
+                                <td><strong>${post.title}</strong></td>
+                                <td>
+                                    <button class="button enable-video-btn" data-post-id="${post.id}">Enable Video Features</button>
+                                    <a href="${post.edit_url}" class="button">Edit Post</a>
+                                </td>
+                            </tr>
+                        `);
+                    });
+                }
+            }
+
+            $(document).on('click', '.enable-video-btn', function() {
+                const btn = $(this);
+                const postId = btn.data('post-id');
+
+                btn.prop('disabled', true).text('Enabling...');
+
+                $.ajax({
+                    url: videoSEO.ajaxurl,
+                    type: 'POST',
+                    data: {
+                        action: 'enable_video_features',
+                        nonce: videoSEO.nonce,
+                        post_id: postId
+                    },
+                    success: function(response) {
+                        if (response.success) {
+                            btn.closest('tr').fadeOut(500, function() {
+                                $(this).remove();
+                                $('#scan-posts-btn').click();
+                            });
+                        }
+                    }
+                });
+            });
+        });
+        </script>
+        <?php
+    }
+
+    public function analytics_page() {
+        global $wpdb;
+
+        $video_posts = get_posts([
+            'post_type' => 'post',
+            'posts_per_page' => -1,
+            'meta_query' => [
+                ['key' => '_is_video_post', 'value' => '1']
+            ]
+        ]);
+
+        ?>
+        <div class="wrap">
+            <h1>Video Analytics</h1>
+
+            <table class="wp-list-table widefat fixed striped">
+                <thead>
+                    <tr>
+                        <th>Post</th>
+                        <th>Total Views</th>
+                        <th>Avg Watch Time</th>
+                        <th>Completion Rate</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <?php foreach ($video_posts as $post):
+                        $stats = $wpdb->get_row($wpdb->prepare(
+                            "SELECT COUNT(*) as views, AVG(watch_time) as avg_time, (SUM(completed) / COUNT(*)) * 100 as completion_rate
+                            FROM {$this->table_name}
+                            WHERE post_id = %d",
+                            $post->ID
+                        ));
+                    ?>
+                    <tr>
+                        <td>
+                            <strong><?php echo esc_html($post->post_title); ?></strong><br>
+                            <a href="<?php echo get_edit_post_link($post->ID); ?>">Edit</a> |
+                            <a href="<?php echo get_permalink($post->ID); ?>" target="_blank">View</a>
+                        </td>
+                        <td><?php echo number_format($stats->views); ?></td>
+                        <td><?php echo gmdate('i:s', (int)$stats->avg_time); ?></td>
+                        <td><?php echo round($stats->completion_rate, 1); ?>%</td>
+                    </tr>
+                    <?php endforeach; ?>
+                </tbody>
+            </table>
+        </div>
+        <?php
+    }
+
     public function settings_page() {
         $youtube_api_key = get_option('video_seo_youtube_api_key', '');
         $enable_analytics = get_option('video_seo_enable_analytics', '1');
@@ -636,16 +1115,6 @@ class VideoSEOProSimple {
                 <h2>Video Sitemap</h2>
                 <p>Your video sitemap: <code><?php echo home_url('/video-sitemap.xml'); ?></code></p>
                 <p>Submit this to Google Search Console!</p>
-
-                <h3 style="margin-top: 30px;">How to Use:</h3>
-                <ol>
-                    <li>Edit any post that contains a video</li>
-                    <li>In the right sidebar, find the "Video SEO Features" box</li>
-                    <li>Check ☑ "Enable video features"</li>
-                    <li>Add your video URL</li>
-                    <li>Save the post</li>
-                    <li>Done! Video will automatically embed and SEO features activate</li>
-                </ol>
             </div>
         </div>
 
@@ -672,4 +1141,4 @@ class VideoSEOProSimple {
     }
 }
 
-new VideoSEOProSimple();
+new VideoSEOPro();

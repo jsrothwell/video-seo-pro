@@ -1,10 +1,10 @@
 <?php
 /**
  * Plugin Name: Video SEO Pro
- * Plugin URI: https://example.com/video-seo-pro
+ * Plugin URI: https://github.com/jsrothwell/video-seo-pro
  * Description: Add video SEO features to your existing posts - no separate post type needed!
  * Version: 2.0.3
- * Author: Your Name
+ * Author: Jamieson Rothwell
  * License: GPL v2 or later
  * Text Domain: video-seo-pro
  */
